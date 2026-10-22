@@ -1,0 +1,34 @@
+name: Sécurité
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"        # chaque lundi : de nouvelles vulnérabilités sont publiées en continu
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependances:
+    name: Vulnérabilités des dépendances (pip-audit)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt
+
+  image:
+    name: Vulnérabilités de l'image (Trivy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t assistant-ia .
+      - name: Scanner l'image (échoue sur les failles critiques corrigeables)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 assistant-ia

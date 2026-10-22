@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read                     # moindre privilège : la CI ne peut rien modifier
+
+concurrency:                         # un nouveau push annule l'exécution devenue obsolète
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualite:
+    name: Lint et tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Lint (ruff, règles de sécurité incluses)
+        run: ruff check .
+      - name: Tests (pytest)
+        run: pytest -v
+
+  evaluation:
+    name: Évaluation et performance (portes de qualité)
+    needs: qualite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Évaluer (échoue si un seuil de qualité ou de sécurité n'est pas atteint)
+        run: python -m eval.run_eval
+      - name: Performance (échoue si p95 > 25 ms sur 2 900 passages)
+        run: python -m eval.bench --multiplier 100 --repetitions 3 --budget-p95 25 | tee bench.json
+      - name: Rapport dans le résumé du job
+        if: always()
+        run: |
+          cat eval/rapport.md >> "$GITHUB_STEP_SUMMARY"
+          printf '\n## Performance\n```json\n%s\n```\n' "$(cat bench.json 2>/dev/null)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rapport-evaluation
+          path: |
+            eval/rapport.md
+            bench.json
+
+  docker:
+    name: Image Docker et test de fumée
+    needs: evaluation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Construire l'image (avec cache entre les exécutions)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: assistant-ia:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Démarrer et interroger l'API
+        run: |
+          docker run -d --name api -p 8000:8000 assistant-ia:test
+          for i in $(seq 30); do curl -sf http://localhost:8000/health && break; sleep 1; done
+          curl -sf -X POST http://localhost:8000/ask -H "X-API-Key: demo-employe" -H "Content-Type: application/json" \
+            -d '{"question":"Combien de jours de télétravail par semaine ?"}' | tee reponse.json
+          python3 -c "import json; r=json.load(open('reponse.json')); assert r['statut']=='ok' and r['sources'], r"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question":"sans cle"}')
+          echo "Sans clé d'API : HTTP $code"; test "$code" = 401
+          test "$(docker exec api id -u)" != 0
+          docker inspect --format '{{.State.Health.Status}}' api
+      - name: Journaux du conteneur
+        if: always()
+        run: docker logs api || true

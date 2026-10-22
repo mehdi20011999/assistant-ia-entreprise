@@ -1,0 +1,24 @@
+# Démarrage :  docker compose up --build                          (mode extractif, sans modèle de langage)
+# Avec un LLM local :  docker compose --profile llm up --build    puis : docker compose exec ollama ollama pull qwen2.5:3b
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-extractif}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      RATE_LIMIT_PER_MINUTE: "30"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama:
